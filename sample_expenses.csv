@@ -1,0 +1,5 @@
+date,category,amount,business_reason,memo_vendor,department,project,project_task,ebitda_addback,receipt_file
+01/12/2026,Ground Transportation Overhead,23.45,Sample trip - taxi from airport to office,Sample Taxi Co,Sales and Marketing,,,,XX_01.12.26_SampleTaxi_23.45.pdf
+01/12/2026,Meals Overhead,41.20,Sample trip - team lunch,Sample Diner,Sales and Marketing,,,,XX_01.12.26_SampleDiner_41.20.pdf
+01/13/2026,Lodging Overhead,189.00,Sample trip - one night hotel,Sample Hotel,Sales and Marketing,,,,XX_01.13.26_SampleHotel_189.00.pdf
+01/13/2026,Event: Department Offsite (annual),75.50,Sample offsite - venue snacks,Sample Catering,Sales and Marketing,,,,XX_01.13.26_SampleCatering_75.50.pdf

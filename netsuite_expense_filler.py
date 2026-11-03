@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""
+NetSuite expense-report filler — fills a draft expense report from a CSV.
+
+Adapted from the old netsuite-automation opportunity editor (same Selenium +
+.env login + 2FA-pause pattern, new target: the Expense Report form).
+
+SELECTOR STRATEGY (not absolute xpaths):
+  NetSuite sublist cells carry data-field-name plus stable input ids/names.
+  Every line field below is located through its sublist cell, e.g.
+    td[data-field-name="category"] input
+  so the same selectors work for every row: only the focused/edited row
+  exposes the display inputs, and clicking Add commits the line and opens
+  a fresh blank row with the same selectors. No row-indexed xpaths.
+
+  Field map (from David's Inspect-element HTML, 2026-11-03):
+    Header date        id="trandate"            (main form, date field)
+    Header report name id="memo" in main_form   (Purpose / Report Name text field)
+                       NOTE: the sublist Memo/Vendor input is ALSO id="memo",
+                       so sublist fields are scoped to td[data-field-name=...]
+                       inside the expense sublist, never by bare By.ID.
+    Line Ref No        auto-filled — skipped
+    Line Date          td[data-field-name="expensedate"] input#expensedate
+    Line Category      td[data-field-name="category"] input#expense_category_display
+                       popupselect/autocomplete: type, Tab, verify hidden
+                       input#hddn_expense_category_fs got a value.
+    Line Amount        td[data-field-name="amount"] input#amount_formattedValue
+    Line Business Rsn  td[data-field-name="custcol_reason"] input#custcol_reason
+                       (custom field, max 300 chars)
+    Line Memo/Vendor   td[data-field-name="memo"] input (scoped to sublist)
+                       (max 999 chars; procedure: vendor name goes here)
+    Billing Subsidiary auto-filled Vertech — skipped, verified if present
+    Line Project       td[data-field-name="customer"] input#expense_customer_display
+                       OPTIONAL: only for billable work. Left blank for
+                       this offsite report; filled only if the CSV has a
+                       project value.
+    Line Project Task  td[data-field-name="projecttask"] input#expense_projecttask_display
+                       OPTIONAL, required only if a project is set.
+    Line Department    td[data-field-name="department"] input[name="inpt_department"]
+                       dropdown; value 2 = "Sales and Marketing" (default).
+                       The script VERIFIES the display value and only
+                       attempts a change if the CSV department differs.
+                       Occasional alternative: Executive Management.
+    Line EBITDA Addbk  td[data-field-name="cseg_ebitda_add"] input[name="inpt_cseg_ebitda_add"]
+                       OPTIONAL: only for CaST executive-management lines,
+                       value "Yes". Ignored/blank otherwise.
+    Line Attach File   td[data-field-name="expmediaitem"] — NOT a direct file
+                       input. Click the "+" button #expmediaitem_popup_new,
+                       which opens a popup window (expensereportmediaitem.nl):
+                         Attach From = Computer (default, per screenshot)
+                         Select File = input[name="mediafile"] in the popup
+                         Save        = input#submitter in the popup
+                       After the popup Save, the popup closes and the line's
+                       expmediaitem field should show the uploaded file.
+                       NOTE: popup Save != report Submit. The report itself
+                       is NEVER submitted by this script.
+    Add line           input#expense_addedit (value "Add")
+
+WHAT IT DOES:
+  1. Logs in to NetSuite (SAML + manual 2FA, same as netsuite_login.py).
+  2. Pauses so YOU navigate to a blank Expense Report.
+  3. Fills header date + report name, then one line per CSV row:
+     date, category, amount, business reason, memo/vendor, department
+     check, optional project/task, optional EBITDA, receipt upload, Add.
+  4. STOPS BEFORE SUBMITTING the report. Browser stays open for review.
+     You click Submit / Submit for Supervisor Approval yourself.
+
+SETUP (on your computer):
+  pip install selenium python-dotenv
+  cp .env.example .env   # edit .env with NETSUITE_URL / USERNAME / PASSWORD
+  python netsuite_expense_filler.py minneapolis-expenses.csv
+  # Receipts are read from ../receipts-for-netsuite/ (renamed per procedure:
+  # XX_MM.DD.YY_Vendor_Amount, e.g. XX_01.25.26_SampleVendor_15.45.pdf)
+"""
+
+import csv
+import os
+import sys
+import time
+
+from dotenv import load_dotenv
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+load_dotenv()
+
+# ------------------------------------------------------------------ header --
+SEL_HEADER_DATE = (By.ID, "trandate")
+# Header report name: the main-form memo field. Scoped by form so it can
+# never resolve to the sublist memo input, which shares id="memo".
+SEL_HEADER_REPORT_NAME = (By.CSS_SELECTOR, 'form[name="main_form"] input[name="memo"]')
+
+# ------------------------------------------------------------------- lines --
+def cell(field_name):
+    """Sublist cell input for a field, scoped so duplicate ids elsewhere
+    on the page (notably memo) cannot be picked up by mistake."""
+    return (By.CSS_SELECTOR, f'td[data-field-name="{field_name}"] input')
+
+SEL_LINE_DATE = cell("expensedate")
+SEL_LINE_CATEGORY = cell("category")
+SEL_LINE_CATEGORY_HIDDEN = (By.ID, "hddn_expense_category_fs")
+SEL_LINE_AMOUNT = cell("amount")
+SEL_LINE_BUSINESS_REASON = cell("custcol_reason")
+SEL_LINE_MEMO = cell("memo")
+SEL_LINE_PROJECT = cell("customer")
+SEL_LINE_PROJECT_HIDDEN = (By.ID, "hddn_expense_customer_fs")
+SEL_LINE_PROJECT_TASK = cell("projecttask")
+SEL_LINE_PROJECT_TASK_HIDDEN = (By.ID, "hddn_expense_projecttask_fs")
+SEL_LINE_DEPARTMENT_DISPLAY = cell("department")
+SEL_LINE_EBITDA_DISPLAY = cell("cseg_ebitda_add")
+SEL_LINE_ATTACH_NEW = (By.ID, "expmediaitem_popup_new")
+SEL_LINE_ATTACH_DISPLAY = cell("expmediaitem")
+SEL_ADD_LINE = (By.ID, "expense_addedit")
+
+# Popup window (file upload) — opened by the Attach File "+" button.
+SEL_POPUP_FILE = (By.CSS_SELECTOR, 'input[name="mediafile"]')
+SEL_POPUP_SAVE = (By.ID, "submitter")
+
+# Report name/date and receipts folder are supplied on the command line
+# (see main()). Example report name, per the procedure naming convention
+# "First Initial Last Name Week Ending MM/DD/YY":
+#   JSmith Week Ending 10/31/26
+# No real report, employee, or receipt data is baked into this script.
+
+
+def fill_text(wait, selector, value, label):
+    el = wait.until(EC.element_to_be_clickable(selector))
+    el.clear()
+    el.send_keys(value)
+    print(f"  {label}: {value}")
+
+
+def fill_popupselect(driver, wait, display_selector, hidden_selector, value, label):
+    """Popupselect/autocomplete: type, Tab to commit, verify hidden input."""
+    el = wait.until(EC.element_to_be_clickable(display_selector))
+    el.clear()
+    el.send_keys(value)
+    time.sleep(1)
+    el.send_keys(Keys.TAB)
+    time.sleep(0.5)
+    hidden = driver.find_element(*hidden_selector)
+    if not hidden.get_attribute("value"):
+        raise RuntimeError(
+            f"{label} '{value}' did not commit (hidden input empty) — "
+            "the suggestion may need Enter instead of Tab, or the exact "
+            "NetSuite label differs. Stopping before any submit.")
+    print(f"  {label}: {value} (committed)")
+
+
+def check_department(driver, wait, wanted):
+    """Department defaults to Sales and Marketing. Verify it; only attempt
+    a change if the CSV asks for something else."""
+    el = wait.until(EC.element_to_be_clickable(SEL_LINE_DEPARTMENT_DISPLAY))
+    current = el.get_attribute("value") or el.get_attribute("title") or ""
+    if current.strip() == wanted.strip():
+        print(f"  Department: {current} (default, unchanged)")
+        return
+    # Different department requested: type into the dropdown input and Enter.
+    el.clear()
+    el.send_keys(wanted)
+    time.sleep(1)
+    el.send_keys(Keys.ENTER)
+    time.sleep(0.5)
+    current = el.get_attribute("value") or el.get_attribute("title") or ""
+    if current.strip() != wanted.strip():
+        raise RuntimeError(
+            f"Department is '{current}', wanted '{wanted}' — change it by hand "
+            "in the browser before continuing. Stopping before any submit.")
+    print(f"  Department: {wanted} (changed)")
+
+
+def upload_receipt(driver, wait, receipt_path, receipt_name):
+    """Attach File flow: '+' button -> popup window -> Choose File -> Save
+    in the popup -> back to the main window. Popup Save is a file-upload
+    save, NOT the report submit."""
+    main_window = driver.current_window_handle
+    before = set(driver.window_handles)
+    btn = wait.until(EC.element_to_be_clickable(SEL_LINE_ATTACH_NEW))
+    btn.click()
+    try:
+        wait.until(lambda d: len(d.window_handles) > len(before))
+    except TimeoutException:
+        raise RuntimeError("Attach File popup did not open. Stopping before any submit.")
+    popup = [h for h in driver.window_handles if h not in before][0]
+    driver.switch_to.window(popup)
+    try:
+        file_input = wait.until(EC.presence_of_element_located(SEL_POPUP_FILE))
+        file_input.send_keys(receipt_path)
+        time.sleep(0.5)
+        save = wait.until(EC.element_to_be_clickable(SEL_POPUP_SAVE))
+        save.click()
+        # Popup should close on its own after a successful upload.
+        wait.until(lambda d: len(d.window_handles) == len(before))
+    finally:
+        # If the popup is still open (validation error, etc.), leave it
+        # open for the user and stop — do not force-close their upload.
+        if popup in driver.window_handles:
+            print("  WARNING: upload popup is still open — check it by hand.")
+            raise RuntimeError("Upload popup did not close after Save. Check it by hand; nothing was submitted.")
+        driver.switch_to.window(main_window)
+    # Back on the main form, the line's Attach File field should now show it.
+    time.sleep(1)
+    shown = driver.find_element(*SEL_LINE_ATTACH_DISPLAY).get_attribute("value") or ""
+    if receipt_name.split(".")[0] not in shown and shown == "":
+        print(f"  WARNING: Attach File field looks empty after upload ({shown!r}) — verify by hand.")
+    else:
+        print(f"  Attached: {receipt_name}")
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Fill a NetSuite expense report draft from a CSV. Never submits.")
+    parser.add_argument("csv_path", help="CSV of expense lines (see sample_expenses.csv)")
+    parser.add_argument("--report-name", required=True,
+                        help='e.g. "JSmith Week Ending 10/31/26"')
+    parser.add_argument("--report-date", default=None,
+                        help="Header date, e.g. 11/3/2026 (defaults to today, MM/DD/YYYY)")
+    parser.add_argument("--receipts-dir", default="receipts",
+                        help="Folder holding the receipt files named in the CSV")
+    args = parser.parse_args()
+    csv_path = args.csv_path
+    report_name = args.report_name
+    receipts_dir = args.receipts_dir
+    if args.report_date:
+        report_date = args.report_date
+    else:
+        import datetime
+        report_date = datetime.date.today().strftime("%m/%d/%Y")
+
+    url = os.getenv("NETSUITE_URL", "http://netsuite.vertech.com/")
+    username = os.getenv("NETSUITE_USERNAME")
+    password = os.getenv("NETSUITE_PASSWORD")
+    if not username or not password:
+        print("Set NETSUITE_USERNAME / NETSUITE_PASSWORD in .env first.")
+        sys.exit(1)
+
+    options = webdriver.ChromeOptions()
+    driver = webdriver.Chrome(options=options)
+    wait = WebDriverWait(driver, 20)
+    try:
+        driver.get(url)
+        driver.maximize_window()
+        # Login: reuse the old project's approach — enter credentials,
+        # then PAUSE for manual 2FA. Do not automate the 2FA step.
+        # (Or log in manually in the opened browser before continuing.)
+        input("Log in (complete 2FA), open a BLANK Expense Report, then press Enter here to start filling...")
+        fill_text(wait, SEL_HEADER_DATE, report_date, "Report date")
+        fill_text(wait, SEL_HEADER_REPORT_NAME, report_name, "Report name")
+
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        print(f"{len(rows)} expense lines, total ${sum(float(r['amount']) for r in rows):.2f}")
+        for i, row in enumerate(rows, start=1):
+            print(f"Line {i}: {row['date']} {row['memo_vendor']} ${row['amount']}")
+            fill_text(wait, SEL_LINE_DATE, row["date"], "Date")
+            fill_popupselect(driver, wait, SEL_LINE_CATEGORY, SEL_LINE_CATEGORY_HIDDEN,
+                             row["category"], "Category")
+            fill_text(wait, SEL_LINE_AMOUNT, row["amount"], "Amount")
+            reason = row["business_reason"]
+            if len(reason) > 300:
+                raise RuntimeError(f"Business Reason over 300 chars on line {i}: {reason}")
+            fill_text(wait, SEL_LINE_BUSINESS_REASON, reason, "Business Reason")
+            fill_text(wait, SEL_LINE_MEMO, row["memo_vendor"], "Memo/Vendor")
+            check_department(driver, wait, row.get("department", "Sales and Marketing"))
+            # Optional: project + task, only for billable work.
+            project = (row.get("project") or "").strip()
+            if project:
+                fill_popupselect(driver, wait, SEL_LINE_PROJECT, SEL_LINE_PROJECT_HIDDEN,
+                                 project, "Project")
+                task = (row.get("project_task") or "").strip()
+                if not task:
+                    raise RuntimeError(f"Line {i} has a project but no project_task — NetSuite requires both.")
+                fill_popupselect(driver, wait, SEL_LINE_PROJECT_TASK, SEL_LINE_PROJECT_TASK_HIDDEN,
+                                 task, "Project Task")
+            # Optional: EBITDA add-back, only for CaST executive-management lines.
+            if (row.get("ebitda_addback") or "").strip().lower() == "yes":
+                el = wait.until(EC.element_to_be_clickable(SEL_LINE_EBITDA_DISPLAY))
+                el.clear()
+                el.send_keys("Yes")
+                el.send_keys(Keys.ENTER)
+                print("  EBITDA Add-back: Yes")
+            # Receipt upload (popup), then Add to commit the line.
+            receipt = os.path.join(receipts_dir, row["receipt_file"])
+            if not os.path.exists(receipt):
+                print(f"  WARNING: receipt file missing, skipped attach: {receipt}")
+            else:
+                upload_receipt(driver, wait, receipt, row["receipt_file"])
+            add = wait.until(EC.element_to_be_clickable(SEL_ADD_LINE))
+            add.click()
+            time.sleep(1)
+
+        print("\nDONE FILLING — NOT SUBMITTED. Review the draft in the browser,")
+        print("then click Submit / Submit for Supervisor Approval yourself.")
+        input("Press Enter to close the browser...")
+    finally:
+        driver.quit()
+
+
+if __name__ == "__main__":
+    main()
