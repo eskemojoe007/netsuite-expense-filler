@@ -5,16 +5,19 @@ It never submits the report — you review the draft in the browser and
 click Submit / Submit for Supervisor Approval yourself.
 
 This is the successor to an older opportunity-entry automation (same
-Selenium + `.env` login + manual 2FA-pause pattern, new target: the
-Expense Report form). NetSuite has no API access for this workflow, so
+Selenium pattern, new target: the Expense Report form). Login is
+NetSuite SSO with 2FA, done by hand in the browser — the script stores
+and types no credentials. NetSuite has no API access for this workflow, so
 the form is filled through the browser, using stable field selectors
 (`data-field-name` sublist cells and input ids) instead of absolute
 xpaths.
 
 ## How it works
 
-1. Logs in to NetSuite (SAML, then pauses for you to complete 2FA manually).
-2. Pauses again so you open a blank Expense Report.
+1. Opens its own Chrome window (or re-attaches to it from an earlier
+   run, so your login is kept). You log in via SSO + 2FA there.
+2. Waits until you open a **new, blank** Expense Report, then starts
+   on its own — no keypress needed.
 3. Fills the header date and report name.
    Report naming convention (per internal procedure):
    `First Initial Last Name Week Ending MM/DD/YY`
@@ -47,7 +50,7 @@ Key field behaviours discovered from the live form:
 
 ```bash
 python -m pipenv install
-cp .env.example .env   # edit .env with your NetSuite URL / username / password
+cp .env.example .env   # NetSuite URL only — no username/password (SSO)
 ```
 
 Never commit `.env` — it is already in `.gitignore`.
@@ -136,7 +139,8 @@ business-reason length) — they do not touch NetSuite or a browser.
 
 ## Safety
 
-- No credentials in the repo; `.env` is gitignored.
+- No credentials anywhere: login is SSO + 2FA by hand. `.env` holds
+  only the NetSuite URL and is gitignored.
 - No real expenses, receipts, or employee data in the repo — the sample
   CSV and example names are fictional.
 - The script stops before submitting; a failed field, a failed category

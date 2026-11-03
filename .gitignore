@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 receipts/
+Pipfile.lock
+# Page dumps saved when a run stops — can contain real report data.
+netsuite_debug_*.html

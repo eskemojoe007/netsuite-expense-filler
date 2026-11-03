@@ -31,6 +31,8 @@ except ImportError:
     exceptions_mod.__path__ = []
     by_mod = types.ModuleType("selenium.webdriver.common.by")
     keys_mod = types.ModuleType("selenium.webdriver.common.keys")
+    action_chains_mod = types.ModuleType("selenium.webdriver.common.action_chains")
+    action_chains_mod.ActionChains = object
     support = types.ModuleType("selenium.webdriver.support")
     support.__path__ = []
     ec_mod = types.ModuleType("selenium.webdriver.support.expected_conditions")
@@ -54,7 +56,11 @@ except ImportError:
     class TimeoutException(Exception):
         pass
 
+    class WebDriverException(Exception):
+        pass
+
     exceptions_mod.TimeoutException = TimeoutException
+    exceptions_mod.WebDriverException = WebDriverException
     common.exceptions = exceptions_mod
     ui_mod.WebDriverWait = object
     webdriver.ChromeOptions = object
@@ -72,6 +78,7 @@ except ImportError:
         "selenium.webdriver.common": common,
         "selenium.webdriver.common.by": by_mod,
         "selenium.webdriver.common.keys": keys_mod,
+        "selenium.webdriver.common.action_chains": action_chains_mod,
         "selenium.webdriver.support": support,
         "selenium.webdriver.support.expected_conditions": ec_mod,
         "selenium.webdriver.support.ui": ui_mod,
@@ -131,6 +138,78 @@ class TestSelectors(unittest.TestCase):
     def test_add_line_selector_is_an_id(self):
         by, value = filler.SEL_ADD_LINE
         self.assertEqual(value, "expense_addedit")
+
+    def test_default_cell_selector_skips_hidden_inputs(self):
+        # The clickable wait checks only the first match; a hidden helper
+        # input first in the cell made the first line time out.
+        by, value = filler.cell("memo")
+        self.assertIn(':not([type="hidden"])', value)
+
+    def test_line_selectors_pin_documented_input_ids(self):
+        expected = {
+            filler.SEL_LINE_DATE: ("expensedate", "input#expensedate"),
+            filler.SEL_LINE_CATEGORY: ("category", "input#expense_category_display"),
+            filler.SEL_LINE_AMOUNT: ("amount", "input#amount_formattedValue"),
+            filler.SEL_LINE_BUSINESS_REASON: ("custcol_reason", "input#custcol_reason"),
+            filler.SEL_LINE_PROJECT: ("customer", "input#expense_customer_display"),
+            filler.SEL_LINE_PROJECT_TASK: ("projecttask", "input#expense_projecttask_display"),
+        }
+        for (by, value), (field, inp) in expected.items():
+            self.assertIn(f'td[data-field-name="{field}"]', value)
+            self.assertTrue(value.endswith(inp), value)
+
+    def test_line_selectors_are_scoped_to_the_edit_row(self):
+        # After line 1 is Added, its committed row has the same cells and
+        # comes first; an unscoped selector clicked line 1 on line 2.
+        for by, value in (filler.SEL_LINE_DATE, filler.SEL_LINE_CATEGORY,
+                          filler.SEL_LINE_MEMO, filler.SEL_LINE_DEPARTMENT_DISPLAY,
+                          filler.SEL_LINE_ATTACH_NEW):
+            self.assertTrue(value.startswith("tr.uir-machine-row-focused"), value)
+            # ...and to the EXPENSE edit row, not another sublist's.
+            self.assertIn(':has(> td[data-field-name="expensedate"])', value)
+
+    def test_find_input_can_split_cell_from_suffix(self):
+        # find_input clicks the cell: everything before the last space.
+        by, value = filler.SEL_LINE_DEPARTMENT_DISPLAY
+        self.assertEqual(value.rsplit(" ", 1)[0], filler.cell_css("department"))
+
+    def test_department_selected_by_name_without_id_suffix(self):
+        by, value = filler.SEL_LINE_DEPARTMENT_DISPLAY
+        self.assertIn('input[name="inpt_department"]', value)
+        self.assertNotIn("inpt_department_", value)
+
+    def test_attach_file_selectors_go_through_their_cell(self):
+        # The "+" button is parked off-table until the expmediaitem cell is
+        # focused, so it must be found via the cell (find_input focuses it).
+        for by, value in (filler.SEL_LINE_ATTACH_NEW, filler.SEL_LINE_ATTACH_DISPLAY):
+            self.assertIn(filler.cell_css("expmediaitem") + " ", value)
+        self.assertTrue(filler.SEL_LINE_ATTACH_NEW[1].endswith("#expmediaitem_popup_new"))
+
+    def test_only_a_never_saved_report_counts_as_new(self):
+        base = "https://1234567.app.netsuite.com/app/accounting/transactions/exprept.nl"
+        self.assertTrue(filler.is_new_report_url(base))
+        self.assertTrue(filler.is_new_report_url(base + "?whence="))
+        # An existing draft has a record id: never fill on top of it.
+        self.assertFalse(filler.is_new_report_url(base + "?id=4821"))
+        self.assertFalse(filler.is_new_report_url(base + "?id=4821&e=T"))
+        self.assertFalse(filler.is_new_report_url(
+            "https://1234567.app.netsuite.com/app/center/card.nl"))
+
+    def test_add_check_counts_only_expense_rows(self):
+        # Other sublists (calls, events, media) also have sublist rows; the
+        # Add commit check must count only rows with an expense date cell.
+        xp = filler.EXPENSE_ROWS_XPATH
+        self.assertIn('data-ui-role="sublist-row"', xp)
+        self.assertIn('td[@data-field-name="expensedate"]', xp)
+
+    def test_chrome_profile_is_outside_the_repo(self):
+        # The profile holds NetSuite session cookies — never in the repo.
+        self.assertFalse(os.path.abspath(filler.CHROME_PROFILE_DIR)
+                         .startswith(os.path.abspath(REPO)))
+
+    def test_header_and_line_memo_are_scoped_apart(self):
+        self.assertIn('form[name="main_form"]', filler.SEL_HEADER_REPORT_NAME[1])
+        self.assertIn('td[data-field-name="memo"]', filler.SEL_LINE_MEMO[1])
 
 
 if __name__ == "__main__":

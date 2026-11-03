@@ -4,8 +4,10 @@
 
 A Selenium script that fills a NetSuite expense report **draft** from a CSV
 file. It is the successor to an older, separate automation that filled
-NetSuite *opportunity* records — same pattern (Selenium + `.env` login +
-manual 2FA pause), new target: the Expense Report form.
+NetSuite *opportunity* records — same Selenium pattern, new target: the
+Expense Report form. Login is NetSuite SSO with 2FA, done by hand in the
+browser: `.env` holds only `NETSUITE_URL` (and optional `CHROME_PATH`),
+never a username or password, and the script must not type credentials.
 
 The reason this exists: Vertech expense reports are entered manually in a
 NetSuite web portal with **no API access**. The only route is the browser.
@@ -27,7 +29,7 @@ Windows, so every command uses `python -m pipenv`:
 ```bash
 python -m pipenv install          # runtime deps
 python -m pipenv install --dev    # + pytest, for tests
-cp .env.example .env              # then fill in NETSUITE_URL / USERNAME / PASSWORD
+cp .env.example .env              # NETSUITE_URL only — login is SSO + 2FA, no credentials
 ```
 
 `.env` lives in the repo folder, not in a trip folder. The script looks
@@ -97,9 +99,17 @@ No real expenses, receipts, or employee data belong in this repo.
 
 ## How the script works (in order)
 
-1. Logs in to NetSuite (SAML), then **pauses for the user to complete
-   2FA manually**. Do not automate the 2FA step.
-2. Pauses again so the user opens a **blank** Expense Report.
+1. Starts its own Chrome (dedicated profile in
+   `%LOCALAPPDATA%\netsuite-expense-filler\chrome-profile`, debugging
+   port 9222), or **re-attaches** to it if it is already open, so the
+   login carries over between runs. The user logs in to NetSuite
+   (SAML) and **completes 2FA manually**. Do not automate the 2FA step
+   or type credentials.
+2. Polls the browser tabs until the user opens a **new, blank** Expense
+   Report (`exprept.nl` with no `id=`, empty report name, no Added
+   lines), then starts. No keypress is needed, so it can also be run from a
+   non-interactive shell (e.g. by Claude Code in the background). Existing
+   drafts and half-filled reports from a stopped run are never filled.
 3. Fills header date + report name.
 4. For each CSV row: date, category, amount, business reason,
    memo/vendor, department check, optional project/task, optional
@@ -154,6 +164,27 @@ Field map (from live Inspect-element HTML, 2026-11-03):
   (`id="submitter"`), wait for the popup to close, switch back, verify
   the line's attach display is non-empty. Popup Save ≠ report Submit.
   If the popup does not close, stop and leave it open for the user.
+- **Only the focused cell holds an input.** NetSuite parks each line
+  field's input (and helper buttons like the Attach "+") off-table in a
+  `display:none` span and moves it into its `td` only when that cell
+  takes focus (`td.uir-machine-focused-cell`). `find_input` therefore
+  gives the cell a real mouse click (ActionChains) and waits for the
+  input to arrive, and `fill_text` Tabs after typing to commit the
+  value. A plain `td.click()` did NOT move focus (2026-11-03 run).
+- **Add can silently not commit.** On the 2026-11-03 run, clicking Add
+  left the line uncommitted with no error, so every CSV row overwrote
+  line 1. `add_line` now verifies the expense row count grows after Add
+  and stops (printing any NetSuite alert/dialog text) if it does not.
+- **Committed rows have the same cells as the edit row.** After line 1
+  is Added, `td[data-field-name=...]` matches line 1's committed cell
+  first. Every line selector is therefore scoped to the expense edit row:
+  `EDIT_ROW = tr.uir-machine-row-focused:has(> td[data-field-name="expensedate"])`
+  (other sublists on the page have their own focused row, hence `:has`).
+- **The Attach "+" is a hover widget.** It sits in the focused
+  expmediaitem cell but Selenium may report it not displayed when the
+  mouse isn't over the field (line 3, 2026-11-03). The script focuses
+  the cell via `input#expense_expmediaitem_display`, then JS-clicks the
+  "+" (runs its own onclick → same upload popup).
 - **Department dropdown id suffix varies** (`inpt_department_4` in one
   capture) — select by `name`, never by the suffixed id.
 
@@ -212,8 +243,15 @@ the offline tests passing without selenium installed.
 
 - Script, sample CSV, tests, Pipfile, README, and this file are in the
   repo and the full test suite passes on Windows / Python 3.14
-  (17 tests: 8 original offline tests + 2 dependency tests + 7
+  (25 tests: 16 offline CSV/selector tests + 2 dependency tests + 7
   folder-mode tests).
+- First live attempt (2026-11-03) timed out locating the first line
+  field. Fixed by pinning line selectors to their documented input ids
+  (the clickable wait only checks the first match, and cells hold hidden
+  helper inputs), clicking the cell to activate the edit row, switching
+  to the tab that shows the report form, and **no longer calling
+  `driver.quit()`**. Any failure now leaves the browser open and saves
+  the page HTML to `netsuite_debug_*.html` (gitignored) in the repo.
 - **No real expense report has been run through this script yet.**
   The first real run is prepared locally (trip folder + CSV +
   receipts) but not yet executed in NetSuite. Before that run, confirm
