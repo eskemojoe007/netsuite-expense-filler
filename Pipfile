@@ -10,5 +10,9 @@ python-dotenv = "*"
 [dev-packages]
 pytest = "*"
 
-[requires]
-python_version = "3.10"
+# No [requires] python_version pin on purpose: pinning "3.10" would make
+# pipenv refuse to use a newer interpreter (e.g. Python 3.14 on Windows).
+# This code uses only stdlib + selenium, so any Python 3.10+ works.
+# Run with the interpreter you have, e.g.:
+#   python -m pipenv install
+# pipenv will use that Python for the virtualenv.

@@ -56,6 +56,12 @@ Note for Windows: the commands in this README use `python -m pipenv ...`
 rather than bare `pipenv ...`, because pipenv is often not on PATH on
 Windows and `python -m pipenv` is the reliable invocation there.
 
+Python version: the Pipfile deliberately does **not** pin a Python
+version. The old project's `python_version = "3.10"` pin would have made
+pipenv refuse a newer interpreter, so it was dropped — this code needs
+only Python 3.10+ and works with 3.14 as well. `python -m pipenv install`
+simply uses whichever Python you run it with.
+
 ## Usage
 
 ```bash
