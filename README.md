@@ -82,7 +82,12 @@ python -m pipenv run python netsuite_expense_filler.py sample_expenses.csv \
 
 ## Tests
 
+Tests live in `tests/` and need pytest, which is a dev dependency —
+plain `pipenv install` won't necessarily include it, so install dev
+dependencies first:
+
 ```bash
+python -m pipenv install --dev
 python -m pipenv run python -m pytest tests/ -v
 # or, without pytest:
 python -m pipenv run python -m unittest discover tests -v
