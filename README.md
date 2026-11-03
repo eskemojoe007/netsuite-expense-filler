@@ -46,16 +46,20 @@ Key field behaviours discovered from the live form:
 ## Setup
 
 ```bash
-pipenv install
+python -m pipenv install
 cp .env.example .env   # edit .env with your NetSuite URL / username / password
 ```
 
 Never commit `.env` — it is already in `.gitignore`.
 
+Note for Windows: the commands in this README use `python -m pipenv ...`
+rather than bare `pipenv ...`, because pipenv is often not on PATH on
+Windows and `python -m pipenv` is the reliable invocation there.
+
 ## Usage
 
 ```bash
-pipenv run python netsuite_expense_filler.py sample_expenses.csv \
+python -m pipenv run python netsuite_expense_filler.py sample_expenses.csv \
   --report-name "JSmith Week Ending 01/17/26" \
   --receipts-dir receipts
 ```
@@ -73,9 +77,9 @@ pipenv run python netsuite_expense_filler.py sample_expenses.csv \
 ## Tests
 
 ```bash
-pipenv run python -m pytest tests/ -v
+python -m pipenv run python -m pytest tests/ -v
 # or, without pytest:
-pipenv run python -m unittest discover tests -v
+python -m pipenv run python -m unittest discover tests -v
 ```
 
 Tests cover only offline logic (CSV parsing, totals, selector building,
