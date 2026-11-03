@@ -64,6 +64,40 @@ simply uses whichever Python you run it with.
 
 ## Usage
 
+## Trip-folder workflow (the usual way to run it)
+
+Download the trip's receipt images/PDFs and the expense CSV into one
+folder — e.g. `OneDrive > Documents > Expense Reports > 2026_10_MSP` —
+then point the script at that folder. It finds the single CSV in the
+folder and takes the receipts from the same folder, so there is no
+separate receipts subfolder to manage:
+
+```bash
+python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDrive - Vertech\Documents\Expense Reports\2026_10_MSP" \
+  --report-name "DFolkner Week Ending 10/31/26"
+```
+
+Rules and notes:
+- The folder must contain **exactly one** `.csv` file. Receipt images
+  and PDFs sitting alongside it are ignored by the folder scan.
+  If there are two CSVs, the script stops and names them — pass the
+  CSV file itself in that case.
+- Passing a CSV file also works, and receipts then default to the
+  CSV's own folder: `--receipts-dir` is only needed if the receipts
+  live somewhere else.
+- The script reads and checks the CSV **before** opening the browser,
+  and warns up front about any receipt files named in the CSV that
+  are missing from the folder (those lines are entered without an
+  attachment, as before).
+- If the folder is on OneDrive, make sure the files are downloaded
+  locally (not cloud-only placeholders) before running — the browser
+  upload needs a real local file path.
+- `.env` lives in the repo folder, not the trip folder. The script
+  looks for it next to itself if it is not found in the folder you
+  run from.
+
+## Other usage
+
 ```bash
 python -m pipenv run python netsuite_expense_filler.py sample_expenses.csv \
   --report-name "JSmith Week Ending 01/17/26" \

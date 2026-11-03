@@ -8,6 +8,7 @@ totals, the selector builder, and the business-reason length limit
 import csv
 import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -134,3 +135,76 @@ class TestSelectors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFolderMode(unittest.TestCase):
+    """resolve_inputs: the trip-folder workflow.
+
+    Download the CSV + receipt files into one folder and hand the script
+    that folder; or hand it a CSV file and receipts default to the CSV's
+    folder. An explicit --receipts-dir always wins.
+    """
+
+    def _make_folder(self, tmp, csv_names):
+        folder = os.path.join(tmp, "2026_10_MSP")
+        os.makedirs(folder)
+        for name in csv_names:
+            with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+                f.write("date,category,amount,business_reason,memo_vendor,"
+                        "department,project,project_task,ebitda_addback,"
+                        "receipt_file\n")
+        return folder
+
+    def test_folder_with_one_csv_uses_it_and_its_folder_for_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["expenses.csv"])
+            csv_path, receipts_dir = filler.resolve_inputs(folder, None)
+            self.assertEqual(csv_path, os.path.join(folder, "expenses.csv"))
+            self.assertEqual(receipts_dir, folder)
+
+    def test_folder_with_no_csv_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, [])
+            with self.assertRaises(FileNotFoundError):
+                filler.resolve_inputs(folder, None)
+
+    def test_folder_with_two_csvs_fails_and_names_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["a.csv", "b.csv"])
+            with self.assertRaises(ValueError) as ctx:
+                filler.resolve_inputs(folder, None)
+            self.assertIn("a.csv", str(ctx.exception))
+            self.assertIn("b.csv", str(ctx.exception))
+
+    def test_csv_file_defaults_receipts_to_its_own_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["expenses.csv"])
+            csv_file = os.path.join(folder, "expenses.csv")
+            csv_path, receipts_dir = filler.resolve_inputs(csv_file, None)
+            self.assertEqual(csv_path, csv_file)
+            self.assertEqual(receipts_dir, folder)
+
+    def test_explicit_receipts_dir_wins_over_both_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["expenses.csv"])
+            other = os.path.join(tmp, "elsewhere")
+            os.makedirs(other)
+            _, receipts_dir = filler.resolve_inputs(folder, other)
+            self.assertEqual(receipts_dir, other)
+            _, receipts_dir = filler.resolve_inputs(
+                os.path.join(folder, "expenses.csv"), other)
+            self.assertEqual(receipts_dir, other)
+
+    def test_missing_path_fails(self):
+        with self.assertRaises(FileNotFoundError):
+            filler.resolve_inputs("/definitely/not/a/real/path", None)
+
+    def test_non_csv_files_in_folder_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["expenses.csv"])
+            # Receipt images/PDFs sitting alongside the CSV must not
+            # confuse the folder scan.
+            for name in ["receipt.jpg", "trip-confirmation.pdf"]:
+                open(os.path.join(folder, name), "w").close()
+            csv_path, _ = filler.resolve_inputs(folder, None)
+            self.assertEqual(csv_path, os.path.join(folder, "expenses.csv"))

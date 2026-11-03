@@ -66,11 +66,22 @@ WHAT IT DOES:
      You click Submit / Submit for Supervisor Approval yourself.
 
 SETUP (on your computer):
-  pip install selenium python-dotenv
+  python -m pipenv install
   cp .env.example .env   # edit .env with NETSUITE_URL / USERNAME / PASSWORD
-  python netsuite_expense_filler.py minneapolis-expenses.csv
-  # Receipts are read from ../receipts-for-netsuite/ (renamed per procedure:
-  # XX_MM.DD.YY_Vendor_Amount, e.g. XX_01.25.26_SampleVendor_15.45.pdf)
+  # .env lives next to this script (or in the folder you run from).
+
+TRIP-FOLDER WORKFLOW (the usual way to run it):
+  Download the trip's receipts (images/PDFs) and the expense CSV into
+  one folder, e.g. OneDrive > Documents > Expense Reports > 2026_10_MSP,
+  then point the script at that folder. It finds the single CSV in the
+  folder and takes the receipts from the same folder — no separate
+  receipts subfolder needed:
+    python -m pipenv run python netsuite_expense_filler.py "2026_10_MSP" \
+        --report-name "DFolkner Week Ending 10/31/26"
+  Receipts are named per procedure: XX_MM.DD.YY_Vendor_Amount, e.g.
+  XX_01.25.26_SampleVendor_15.45.pdf. If the folder is on OneDrive, make
+  sure the files are downloaded locally (not cloud-only placeholders)
+  before running, or the browser upload cannot read them.
 """
 
 import csv
@@ -87,6 +98,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 load_dotenv()
+# .env normally lives next to this script (the repo folder), but the
+# script is often run with a trip folder as the working directory, so
+# fall back to the script's own folder if the cwd lookup found nothing.
+if not os.getenv("NETSUITE_USERNAME"):
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ------------------------------------------------------------------ header --
 SEL_HEADER_DATE = (By.ID, "trandate")
@@ -211,20 +227,75 @@ def upload_receipt(driver, wait, receipt_path, receipt_name):
         print(f"  Attached: {receipt_name}")
 
 
+def resolve_inputs(csv_arg, receipts_dir_arg):
+    """Resolve (csv_path, receipts_dir) from the command-line arguments.
+
+    Two ways to run it:
+      - a CSV file: receipts default to the CSV's own folder, unless
+        --receipts-dir is given explicitly.
+      - a folder: it must contain exactly one .csv file; that CSV is
+        used and receipts default to the same folder.
+    This is what makes the trip-folder workflow work: download the CSV
+    and all the receipt images/PDFs into one folder and hand the script
+    that folder.
+    """
+    from pathlib import Path
+    path = Path(csv_arg)
+    if path.is_dir():
+        csvs = sorted(f for f in path.iterdir()
+                      if f.is_file() and f.suffix.lower() == ".csv")
+        if not csvs:
+            raise FileNotFoundError(
+                f"No .csv file found in folder: {csv_arg}")
+        if len(csvs) > 1:
+            names = ", ".join(f.name for f in csvs)
+            raise ValueError(
+                f"Folder {csv_arg} contains more than one .csv file "
+                f"({names}) — pass the CSV file itself instead of the folder.")
+        csv_path = str(csvs[0])
+        receipts_dir = receipts_dir_arg or str(path)
+    elif path.is_file():
+        csv_path = str(path)
+        receipts_dir = receipts_dir_arg or str(path.parent) or "."
+    else:
+        raise FileNotFoundError(f"CSV or folder not found: {csv_arg}")
+    return csv_path, receipts_dir
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Fill a NetSuite expense report draft from a CSV. Never submits.")
-    parser.add_argument("csv_path", help="CSV of expense lines (see sample_expenses.csv)")
+    parser.add_argument("csv_path",
+                        help="CSV of expense lines (see sample_expenses.csv), "
+                             "OR a folder containing exactly one CSV plus "
+                             "its receipt files (trip-folder workflow)")
     parser.add_argument("--report-name", required=True,
                         help='e.g. "JSmith Week Ending 10/31/26"')
     parser.add_argument("--report-date", default=None,
                         help="Header date, e.g. 11/3/2026 (defaults to today, MM/DD/YYYY)")
-    parser.add_argument("--receipts-dir", default="receipts",
-                        help="Folder holding the receipt files named in the CSV")
+    parser.add_argument("--receipts-dir", default=None,
+                        help="Folder holding the receipt files named in the CSV "
+                             "(default: the CSV's folder, or the folder given "
+                             "as csv_path)")
     args = parser.parse_args()
-    csv_path = args.csv_path
+    try:
+        csv_path, receipts_dir = resolve_inputs(args.csv_path, args.receipts_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}")
+        sys.exit(2)
     report_name = args.report_name
-    receipts_dir = args.receipts_dir
+    # Read and check the CSV up front, before opening the browser, so a
+    # bad folder / missing receipt is caught before login, not mid-run.
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    print(f"{csv_path}: {len(rows)} expense lines, "
+          f"total ${sum(float(r['amount']) for r in rows):.2f}")
+    missing = [r["receipt_file"] for r in rows
+               if not os.path.exists(os.path.join(receipts_dir, r["receipt_file"]))]
+    if missing:
+        print("WARNING: these receipt files are missing from "
+              f"{receipts_dir} (those lines will be entered without an "
+              f"attachment): " + ", ".join(missing))
     if args.report_date:
         report_date = args.report_date
     else:
@@ -251,9 +322,6 @@ def main():
         fill_text(wait, SEL_HEADER_DATE, report_date, "Report date")
         fill_text(wait, SEL_HEADER_REPORT_NAME, report_name, "Report name")
 
-        with open(csv_path, newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.DictReader(f))
-        print(f"{len(rows)} expense lines, total ${sum(float(r['amount']) for r in rows):.2f}")
         for i, row in enumerate(rows, start=1):
             print(f"Line {i}: {row['date']} {row['memo_vendor']} ${row['amount']}")
             fill_text(wait, SEL_LINE_DATE, row["date"], "Date")
