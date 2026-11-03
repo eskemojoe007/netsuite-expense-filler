@@ -84,7 +84,11 @@ python -m pipenv run python netsuite_expense_filler.py sample_expenses.csv \
 
 Tests live in `tests/` and need pytest, which is a dev dependency —
 plain `pipenv install` won't necessarily include it, so install dev
-dependencies first:
+dependencies first. `tests/test_dependencies.py` is a separate check
+that the real selenium + python-dotenv packages are actually installed
+(it does not use the stubs the offline tests use, so it fails loudly
+with the install command if they are missing — the usual fresh-checkout
+problem):
 
 ```bash
 python -m pipenv install --dev
