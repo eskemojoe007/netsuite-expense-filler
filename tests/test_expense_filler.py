@@ -287,3 +287,57 @@ class TestFolderMode(unittest.TestCase):
                 open(os.path.join(folder, name), "w").close()
             csv_path, _ = filler.resolve_inputs(folder, None)
             self.assertEqual(csv_path, os.path.join(folder, "expenses.csv"))
+
+
+class TestPhaseMode(unittest.TestCase):
+    """--phase pre-trip / post-trip: one trip folder, two reports.
+
+    A folder with pre-trip-expenses.csv + post-trip-expenses.csv must
+    resolve by phase, and must fail without a phase (naming the flag).
+    """
+
+    def _make_split_folder(self, tmp):
+        folder = os.path.join(tmp, "2026_12_Phx")
+        os.makedirs(folder)
+        for name in ["pre-trip-expenses.csv", "post-trip-expenses.csv"]:
+            with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+                f.write("date,category,amount,business_reason,memo_vendor,"
+                        "department,project,project_task,ebitda_addback,"
+                        "receipt_file\n")
+        return folder
+
+    def test_phase_pre_trip_picks_pre_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_split_folder(tmp)
+            csv_path, receipts = filler.resolve_inputs(folder, None, phase="pre-trip")
+            self.assertEqual(csv_path, os.path.join(folder, "pre-trip-expenses.csv"))
+            self.assertEqual(receipts, folder)
+
+    def test_phase_post_trip_picks_post_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_split_folder(tmp)
+            csv_path, _ = filler.resolve_inputs(folder, None, phase="post-trip")
+            self.assertEqual(csv_path, os.path.join(folder, "post-trip-expenses.csv"))
+
+    def test_split_folder_without_phase_fails_naming_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_split_folder(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                filler.resolve_inputs(folder, None)
+            self.assertIn("--phase", str(ctx.exception))
+
+    def test_phase_missing_file_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "trip")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "pre-trip-expenses.csv"), "w") as f:
+                f.write("date\n")
+            with self.assertRaises(FileNotFoundError):
+                filler.resolve_inputs(folder, None, phase="post-trip")
+
+    def test_phase_with_csv_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_split_folder(tmp)
+            csv_file = os.path.join(folder, "pre-trip-expenses.csv")
+            csv_path, _ = filler.resolve_inputs(csv_file, None, phase="post-trip")
+            self.assertEqual(csv_path, csv_file)

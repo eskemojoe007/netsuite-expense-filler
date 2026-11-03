@@ -80,11 +80,28 @@ python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDri
   --report-name "DFolkner Week Ending 10/31/26"
 ```
 
+## Pre-trip / post-trip split
+
+Per policy, a receipt must be submitted BEFORE the trip, so one trip
+folder can hold two reports: `pre-trip-expenses.csv` (airfare + prepaid,
+filed before departure) and `post-trip-expenses.csv` (hotel, meals,
+ground, filed after return). Use `--phase` to pick one from a folder:
+
+```bash
+python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDrive - Vertech\Documents\Expense Reports\2026_12_Phx" \
+  --phase pre-trip --report-name "DFolkner Week Ending 12/05/26"
+```
+
+A pre-trip run also warns (without blocking) if the report date is on
+or after the first expense date in the CSV. Passing a CSV file directly
+always works, with or without `--phase`.
+
 Rules and notes:
-- The folder must contain **exactly one** `.csv` file. Receipt images
-  and PDFs sitting alongside it are ignored by the folder scan.
-  If there are two CSVs, the script stops and names them — pass the
-  CSV file itself in that case.
+- A folder without `--phase` must contain **exactly one** `.csv` file.
+  Receipt images and PDFs sitting alongside it are ignored by the
+  folder scan. If there are two CSVs, the script stops and names them
+  — pass the CSV file itself, or add `--phase pre-trip` /
+  `--phase post-trip`, in that case.
 - Passing a CSV file also works, and receipts then default to the
   CSV's own folder: `--receipts-dir` is only needed if the receipts
   live somewhere else.

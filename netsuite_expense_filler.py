@@ -73,6 +73,16 @@ SETUP (on your computer):
   cp .env.example .env   # NETSUITE_URL only (optional CHROME_PATH); no credentials
   # .env lives next to this script (or in the folder you run from).
 
+PRE-TRIP / POST-TRIP SPLIT:
+  One trip folder holds two reports: pre-trip-expenses.csv (airfare +
+  prepaid, filed before departure) and post-trip-expenses.csv (hotel,
+  meals, ground, filed after return). Folder mode with --phase picks
+  one of them:
+    python -m pipenv run python netsuite_expense_filler.py "2026_12_MSP" \
+        --phase pre-trip --report-name "DFolkner Week Ending 12/05/26"
+  Without --phase, a folder with two CSVs is an error. Passing a CSV
+  file directly always works, phase or not.
+
 TRIP-FOLDER WORKFLOW (the usual way to run it):
   Download the trip's receipts (images/PDFs) and the expense CSV into
   one folder, e.g. OneDrive > Documents > Expense Reports > 2026_10_MSP,
@@ -488,21 +498,45 @@ def save_debug_page(driver):
         print(f"  (could not save page HTML: {exc})")
 
 
-def resolve_inputs(csv_arg, receipts_dir_arg):
+PHASE_CSV_NAMES = {
+    "pre-trip": "pre-trip-expenses.csv",
+    "post-trip": "post-trip-expenses.csv",
+}
+
+
+def resolve_inputs(csv_arg, receipts_dir_arg, phase=None):
     """Resolve (csv_path, receipts_dir) from the command-line arguments.
 
-    Two ways to run it:
+    Ways to run it:
       - a CSV file: receipts default to the CSV's own folder, unless
-        --receipts-dir is given explicitly.
+        --receipts-dir is given explicitly. --phase, if given, is only
+        a label in this case — the file itself is what gets filled.
       - a folder: it must contain exactly one .csv file; that CSV is
         used and receipts default to the same folder.
-    This is what makes the trip-folder workflow work: download the CSV
-    and all the receipt images/PDFs into one folder and hand the script
-    that folder.
+      - a folder + --phase pre-trip / post-trip: the folder's
+        pre-trip-expenses.csv or post-trip-expenses.csv is used. This
+        is the pre-trip / post-trip split: one trip folder holds two
+        reports (pre-trip filed before departure, post-trip after
+        return), so folder mode can no longer mean "the one CSV" —
+        the phase picks which one. Without --phase, a folder with two
+        CSVs is an error that names the phase flag.
     """
     from pathlib import Path
     path = Path(csv_arg)
     if path.is_dir():
+        if phase:
+            wanted = PHASE_CSV_NAMES[phase]
+            candidate = path / wanted
+            if not candidate.is_file():
+                present = ", ".join(sorted(
+                    f.name for f in path.iterdir()
+                    if f.is_file() and f.suffix.lower() == ".csv"))
+                raise FileNotFoundError(
+                    f"No {wanted} found in folder {csv_arg} "
+                    f"(found: {present or 'no CSV files'}).")
+            csv_path = str(candidate)
+            receipts_dir = receipts_dir_arg or str(path)
+            return csv_path, receipts_dir
         csvs = sorted(f for f in path.iterdir()
                       if f.is_file() and f.suffix.lower() == ".csv")
         if not csvs:
@@ -512,7 +546,8 @@ def resolve_inputs(csv_arg, receipts_dir_arg):
             names = ", ".join(f.name for f in csvs)
             raise ValueError(
                 f"Folder {csv_arg} contains more than one .csv file "
-                f"({names}) — pass the CSV file itself instead of the folder.")
+                f"({names}) — pass the CSV file itself, or add "
+                f"--phase pre-trip / --phase post-trip to pick one.")
         csv_path = str(csvs[0])
         receipts_dir = receipts_dir_arg or str(path)
     elif path.is_file():
@@ -538,9 +573,15 @@ def main():
                         help="Folder holding the receipt files named in the CSV "
                              "(default: the CSV's folder, or the folder given "
                              "as csv_path)")
+    parser.add_argument("--phase", choices=["pre-trip", "post-trip"],
+                        default=None,
+                        help="Pre-trip / post-trip split: with a folder, pick "
+                             "pre-trip-expenses.csv or post-trip-expenses.csv "
+                             "from that folder. With a CSV file, ignored.")
     args = parser.parse_args()
     try:
-        csv_path, receipts_dir = resolve_inputs(args.csv_path, args.receipts_dir)
+        csv_path, receipts_dir = resolve_inputs(
+            args.csv_path, args.receipts_dir, phase=args.phase)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}")
         sys.exit(2)
@@ -551,6 +592,8 @@ def main():
         rows = list(csv.DictReader(f))
     print(f"{csv_path}: {len(rows)} expense lines, "
           f"total ${sum(float(r['amount']) for r in rows):.2f}")
+    if args.phase:
+        print(f"Phase: {args.phase}")
     missing = [r["receipt_file"] for r in rows
                if not os.path.exists(os.path.join(receipts_dir, r["receipt_file"]))]
     if missing:
@@ -562,6 +605,22 @@ def main():
     else:
         import datetime
         report_date = datetime.date.today().strftime("%m/%d/%Y")
+    if args.phase == "pre-trip" and rows:
+        # Policy: pre-trip receipts must be submitted BEFORE the trip.
+        # Warn, don't block, if the report date is already on/after the
+        # first expense (travel) date in the CSV.
+        import datetime as _dt
+        try:
+            first = _dt.datetime.strptime(rows[0]["date"], "%m/%d/%Y").date()
+            report = _dt.datetime.strptime(report_date, "%m/%d/%Y").date()
+            if report >= first:
+                print(f"WARNING: pre-trip report date {report_date} is on "
+                      f"or after the first expense date {rows[0]['date']} — "
+                      f"pre-trip receipts are supposed to be submitted "
+                      f"before the trip. Continuing anyway; check the "
+                      f"report date before submitting.")
+        except Exception:
+            pass
 
     url = os.getenv("NETSUITE_URL", "http://netsuite.vertech.com/")
     driver = open_browser(url)
