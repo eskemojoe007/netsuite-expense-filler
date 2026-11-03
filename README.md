@@ -46,7 +46,7 @@ Key field behaviours discovered from the live form:
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+pipenv install
 cp .env.example .env   # edit .env with your NetSuite URL / username / password
 ```
 
@@ -55,7 +55,7 @@ Never commit `.env` — it is already in `.gitignore`.
 ## Usage
 
 ```bash
-python netsuite_expense_filler.py sample_expenses.csv \
+pipenv run python netsuite_expense_filler.py sample_expenses.csv \
   --report-name "JSmith Week Ending 01/17/26" \
   --receipts-dir receipts
 ```
@@ -73,9 +73,9 @@ python netsuite_expense_filler.py sample_expenses.csv \
 ## Tests
 
 ```bash
-python -m pytest tests/ -v
+pipenv run python -m pytest tests/ -v
 # or, without pytest:
-python -m unittest discover tests -v
+pipenv run python -m unittest discover tests -v
 ```
 
 Tests cover only offline logic (CSV parsing, totals, selector building,
