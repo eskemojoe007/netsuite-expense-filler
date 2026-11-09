@@ -200,6 +200,21 @@ Field map (from live Inspect-element HTML, 2026-11-03):
   mouse isn't over the field (line 3, 2026-11-03). The script focuses
   the cell via `input#expense_expmediaitem_display`, then JS-clicks the
   "+" (runs its own onclick → same upload popup).
+- **Don't press Enter in the EBITDA dropdown.** On the 2026-11-09 run
+  (first live EBITDA line) the script typed `Yes` + Enter, and the run
+  died before the receipt upload. The line was never Added, the attach
+  field was empty, and no debug HTML was written. The likely cause is
+  that Enter fired NetSuite's line validate/Add and popped an alert,
+  which breaks every later Selenium call. `fill_dropdown` now commits
+  with Tab and verifies the value. `raise_on_alert` / `take_alert`
+  stop the run with the alert text and clear it, so the debug dump
+  still works.
+- **Attach is mandatory when the receipt file exists.** If the line's
+  attach field (`hddn_expense_expmediaitem_fs` / display) is still empty
+  after the popup closes, the run stops before Add. It no longer just
+  warns.
+- **Every run writes `netsuite_run_*.log`** (console copy, repo folder,
+  gitignored), so a failed run can be traced after the terminal is gone.
 - **Department dropdown id suffix varies** (`inpt_department_4` in one
   capture) — select by `name`, never by the suffixed id.
 

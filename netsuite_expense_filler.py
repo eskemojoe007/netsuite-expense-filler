@@ -194,6 +194,7 @@ SEL_LINE_EBITDA_DISPLAY = cell("cseg_ebitda_add", 'input[name="inpt_cseg_ebitda_
 # expmediaitem cell is focused, so it is located through the cell too.
 SEL_LINE_ATTACH_NEW = cell("expmediaitem", "a#expmediaitem_popup_new")
 SEL_LINE_ATTACH_DISPLAY = cell("expmediaitem", "input#expense_expmediaitem_display")
+SEL_LINE_ATTACH_HIDDEN = (By.ID, "hddn_expense_expmediaitem_fs")
 SEL_ADD_LINE = (By.ID, "expense_addedit")
 
 # Popup window (file upload) — opened by the Attach File "+" button.
@@ -205,6 +206,27 @@ SEL_POPUP_SAVE = (By.ID, "submitter")
 # "First Initial Last Name Week Ending MM/DD/YY":
 #   JSmith Week Ending 10/31/26
 # No real report, employee, or receipt data is baked into this script.
+
+
+def take_alert(driver):
+    """If a browser alert is open, return its text and accept it; else None.
+    An open alert makes every later Selenium call (including page_source for
+    the debug dump) fail, so it must be read and cleared first."""
+    try:
+        alert = driver.switch_to.alert
+        text = alert.text
+        alert.accept()
+        return text or ""
+    except WebDriverException:
+        return None
+
+
+def raise_on_alert(driver, label):
+    """Stop the run if setting `label` made NetSuite pop an alert."""
+    text = take_alert(driver)
+    if text is not None:
+        raise RuntimeError(f"NetSuite alert after {label}: {text!r}. "
+                           "Stopping before any submit.")
 
 
 def _shown(driver, selector):
@@ -267,6 +289,7 @@ def fill_popupselect(driver, wait, display_selector, hidden_selector, value, lab
     time.sleep(1)
     el.send_keys(Keys.TAB)
     time.sleep(0.5)
+    raise_on_alert(driver, label)
     hidden = driver.find_element(*hidden_selector)
     if not hidden.get_attribute("value"):
         raise RuntimeError(
@@ -290,12 +313,39 @@ def check_department(driver, wait, wanted):
     time.sleep(1)
     el.send_keys(Keys.ENTER)
     time.sleep(0.5)
+    raise_on_alert(driver, "Department")
     current = el.get_attribute("value") or el.get_attribute("title") or ""
     if current.strip() != wanted.strip():
         raise RuntimeError(
             f"Department is '{current}', wanted '{wanted}' — change it by hand "
             "in the browser before continuing. Stopping before any submit.")
     print(f"  Department: {wanted} (changed)")
+
+
+def fill_dropdown(driver, wait, selector, value, label):
+    """Type-ahead dropdown (e.g. EBITDA Add-back): type, commit with Tab
+    (NOT Enter — Enter in a line field can fire NetSuite's line Add/validate
+    and pop an alert; that killed the 2026-11-09 run right before the receipt
+    upload), then verify the dropdown shows the value."""
+    el = find_input(driver, wait, selector, label)
+    el.clear()
+    el.send_keys(value)
+    time.sleep(1)
+    el.send_keys(Keys.TAB)
+    time.sleep(0.5)
+    raise_on_alert(driver, label)
+    current = (el.get_attribute("value") or el.get_attribute("title") or "").strip()
+    if current != value.strip():
+        raise RuntimeError(
+            f"{label} shows '{current}', wanted '{value}' — set it by hand. "
+            "Stopping before any submit.")
+    print(f"  {label}: {value}")
+
+
+def attachment_present(hidden_value, display_value):
+    """The line's Attach File field holds a file once either its hidden id
+    or its display text is non-empty."""
+    return bool((hidden_value or "").strip() or (display_value or "").strip())
 
 
 def upload_receipt(driver, wait, receipt_path, receipt_name):
@@ -308,6 +358,7 @@ def upload_receipt(driver, wait, receipt_path, receipt_name):
     # cell is focused). The "+" is a hover widget: Selenium can see it as
     # not displayed even in the focused cell (line 3 of the 2026-11-03 run),
     # so trigger its own onclick, which opens the same upload popup.
+    raise_on_alert(driver, "the field before Attach File")
     find_input(driver, wait, SEL_LINE_ATTACH_DISPLAY, "Attach File")
     btn = wait.until(EC.presence_of_element_located(SEL_LINE_ATTACH_NEW))
     driver.execute_script("arguments[0].click();", btn)
@@ -334,12 +385,17 @@ def upload_receipt(driver, wait, receipt_path, receipt_name):
         driver.switch_to.window(main_window)
     # Back on the main form, the line's Attach File field should now show it.
     time.sleep(1)
+    raise_on_alert(driver, "receipt upload")
+    hidden = driver.find_elements(*SEL_LINE_ATTACH_HIDDEN)
     display = driver.find_elements(*SEL_LINE_ATTACH_DISPLAY)
+    hidden_val = (hidden[0].get_attribute("value") or "") if hidden else ""
     shown = (display[0].get_attribute("value") or "") if display else ""
-    if receipt_name.split(".")[0] not in shown and shown == "":
-        print(f"  WARNING: Attach File field looks empty after upload ({shown!r}) — verify by hand.")
-    else:
-        print(f"  Attached: {receipt_name}")
+    if not attachment_present(hidden_val, shown):
+        # Never Add a line without its receipt when the file exists.
+        raise RuntimeError(
+            f"Attach File is still empty after uploading {receipt_name} — "
+            "attach it by hand, then click Add. Stopping before any submit.")
+    print(f"  Attached: {receipt_name} ({shown or hidden_val})")
 
 
 # ----------------------------------------------------------------- browser --
@@ -521,6 +577,47 @@ def save_debug_page(driver):
         print(f"  Page HTML saved to {path}")
     except Exception as exc:
         print(f"  (could not save page HTML: {exc})")
+
+
+def run_log_path(stamp=None):
+    """Where this run's console output is copied: next to the script (repo
+    folder, gitignored — it holds real report data), like the debug HTML."""
+    import datetime
+    stamp = stamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        f"netsuite_run_{stamp}.log")
+
+
+class Tee:
+    """Write console output to the terminal AND the run log, so a run can
+    be traced afterwards even if the terminal output is gone."""
+
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, text):
+        self.stream.write(text)
+        try:
+            self.log_file.write(text)
+            self.log_file.flush()
+        except (OSError, ValueError):
+            pass
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+def start_run_log():
+    path = run_log_path()
+    try:
+        log_file = open(path, "w", encoding="utf-8")
+    except OSError as exc:
+        print(f"(could not open run log {path}: {exc})")
+        return
+    sys.stdout = Tee(sys.stdout, log_file)
+    print(f"Run log: {path}")
 
 
 PHASE_CSV_NAMES = {
@@ -724,6 +821,7 @@ def main():
                              "newest .zip, or the ZIP named. This is the "
                              "only write the script does outside NetSuite.")
     args = parser.parse_args()
+    start_run_log()
     # Resolve the target: an explicit path wins; --trip names a folder
     # under the expense-reports root instead.
     target = args.csv_path
@@ -823,11 +921,7 @@ def main():
                                  task, "Project Task")
             # Optional: EBITDA add-back, only for CaST executive-management lines.
             if (row.get("ebitda_addback") or "").strip().lower() == "yes":
-                el = find_input(driver, wait, SEL_LINE_EBITDA_DISPLAY, "EBITDA Add-back")
-                el.clear()
-                el.send_keys("Yes")
-                el.send_keys(Keys.ENTER)
-                print("  EBITDA Add-back: Yes")
+                fill_dropdown(driver, wait, SEL_LINE_EBITDA_DISPLAY, "Yes", "EBITDA Add-back")
             # Receipt upload (popup), then Add to commit the line.
             receipt = os.path.join(receipts_dir, row["receipt_file"])
             if not os.path.exists(receipt):
@@ -848,6 +942,11 @@ def main():
         # Safety rule: any failure stops the run with the browser LEFT OPEN
         # (no driver.quit()) so the user can see and fix the draft by hand.
         print(f"\nSTOPPED: {type(exc).__name__}: {exc}")
+        # An open alert blocks every later call, including the HTML dump:
+        # read it, print it, and clear it first.
+        alert = take_alert(driver)
+        if alert is not None:
+            print(f"  NetSuite alert: {alert}")
         try:
             print(f"  Current page: {driver.current_url}")
             for msg in page_messages(driver):

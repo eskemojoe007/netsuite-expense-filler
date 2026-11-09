@@ -5,3 +5,5 @@ receipts/
 Pipfile.lock
 # Page dumps saved when a run stops — can contain real report data.
 netsuite_debug_*.html
+# Run logs (console copy) — also contain real report data.
+netsuite_run_*.log

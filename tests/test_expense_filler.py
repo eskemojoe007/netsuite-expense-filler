@@ -470,3 +470,120 @@ class TestSubmittalZip(unittest.TestCase):
                 self.assertEqual(f.read(), "date,amount\n")
             # Nothing escaped the trip folder.
             self.assertFalse(os.path.exists(os.path.join(tmp, "ignored-dir")))
+
+
+class _FakeAlert:
+    def __init__(self, text):
+        self.text = text
+        self.accepted = False
+
+    def accept(self):
+        self.accepted = True
+
+
+class _FakeSwitchTo:
+    def __init__(self, alert):
+        self._alert = alert
+
+    @property
+    def alert(self):
+        if self._alert is None:
+            raise filler.WebDriverException("no such alert")
+        return self._alert
+
+
+class _FakeDriver:
+    def __init__(self, alert=None):
+        self.switch_to = _FakeSwitchTo(alert)
+
+
+class _FakeInput:
+    """Records keys; after Tab, shows whatever value `commits_to` says."""
+
+    def __init__(self, commits_to):
+        self.keys = []
+        self.commits_to = commits_to
+        self.value = ""
+
+    def clear(self):
+        self.value = ""
+
+    def send_keys(self, k):
+        self.keys.append(k)
+        if k == filler.Keys.TAB:
+            self.value = self.commits_to
+
+    def get_attribute(self, name):
+        return self.value if name == "value" else None
+
+
+class TestAlertsAndDropdowns(unittest.TestCase):
+    """2026-11-09 run: Enter on the EBITDA dropdown (likely) popped a NetSuite
+    alert that killed the receipt upload and the debug dump."""
+
+    def setUp(self):
+        self._sleep = filler.time.sleep
+        filler.time.sleep = lambda s: None
+        self._find_input = filler.find_input
+
+    def tearDown(self):
+        filler.time.sleep = self._sleep
+        filler.find_input = self._find_input
+
+    def test_take_alert_returns_text_and_accepts(self):
+        alert = _FakeAlert("Please enter value(s) for: Attach File")
+        self.assertEqual(filler.take_alert(_FakeDriver(alert)),
+                         "Please enter value(s) for: Attach File")
+        self.assertTrue(alert.accepted)
+
+    def test_take_alert_none_without_alert(self):
+        self.assertIsNone(filler.take_alert(_FakeDriver()))
+
+    def test_raise_on_alert_names_the_field(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            filler.raise_on_alert(_FakeDriver(_FakeAlert("boom")), "EBITDA Add-back")
+        self.assertIn("EBITDA Add-back", str(ctx.exception))
+        self.assertIn("boom", str(ctx.exception))
+
+    def test_fill_dropdown_commits_with_tab_not_enter(self):
+        el = _FakeInput(commits_to="Yes")
+        filler.find_input = lambda *a, **k: el
+        filler.fill_dropdown(_FakeDriver(), None, None, "Yes", "EBITDA Add-back")
+        self.assertIn(filler.Keys.TAB, el.keys)
+        self.assertNotIn(filler.Keys.ENTER, el.keys)
+
+    def test_fill_dropdown_raises_when_value_does_not_stick(self):
+        el = _FakeInput(commits_to="")
+        filler.find_input = lambda *a, **k: el
+        with self.assertRaises(RuntimeError):
+            filler.fill_dropdown(_FakeDriver(), None, None, "Yes", "EBITDA Add-back")
+
+    def test_fill_dropdown_raises_on_alert(self):
+        el = _FakeInput(commits_to="Yes")
+        filler.find_input = lambda *a, **k: el
+        with self.assertRaises(RuntimeError):
+            filler.fill_dropdown(_FakeDriver(_FakeAlert("x")), None, None,
+                                 "Yes", "EBITDA Add-back")
+
+
+class TestAttachmentAndRunLog(unittest.TestCase):
+    def test_attachment_present(self):
+        self.assertFalse(filler.attachment_present("", ""))
+        self.assertFalse(filler.attachment_present(None, "  "))
+        self.assertTrue(filler.attachment_present("12345", ""))
+        self.assertTrue(filler.attachment_present("", "DF_receipt.pdf"))
+
+    def test_run_log_path_in_repo_folder_and_gitignored_pattern(self):
+        path = filler.run_log_path("20261109_120000")
+        self.assertEqual(os.path.basename(path), "netsuite_run_20261109_120000.log")
+        self.assertEqual(os.path.dirname(path), REPO)
+        with open(os.path.join(REPO, ".gitignore")) as f:
+            self.assertIn("netsuite_run_*.log", f.read())
+
+    def test_tee_writes_both(self):
+        import io
+        out, log = io.StringIO(), io.StringIO()
+        tee = filler.Tee(out, log)
+        tee.write("hello\n")
+        self.assertEqual(out.getvalue(), "hello\n")
+        self.assertEqual(log.getvalue(), "hello\n")
