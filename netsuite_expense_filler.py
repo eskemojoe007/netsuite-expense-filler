@@ -83,6 +83,31 @@ PRE-TRIP / POST-TRIP SPLIT:
   Without --phase, a folder with two CSVs is an error. Passing a CSV
   file directly always works, phase or not.
 
+  A trip can need SEVERAL submittals for the same phase (weekly
+  submittals as receipts come in). Numbered siblings are supported:
+  pre-trip-expenses-1.csv, pre-trip-expenses-2.csv, ... (same for
+  post-trip). The unnumbered file counts as the first. With --phase
+  and exactly one matching file, it is used as-is; with several,
+  --number N picks one:
+    ... netsuite_expense_filler.py "2026_12_MSP" --phase pre-trip \
+        --number 2 --report-name "DFolkner Week Ending 12/12/26"
+
+DEFAULT FOLDERS + SUBMITTAL ZIPS:
+  Prepared submittals arrive as a zip in the Downloads folder. The
+  script can extract one into the trip folder before filling:
+    ... netsuite_expense_filler.py --trip "2026_12_PHX Christmas" \
+        --extract --phase pre-trip \
+        --report-name "DFolkner Week Ending 12/05/26"
+  --extract [ZIP] takes the newest .zip in Downloads, or the one
+  named. --trip NAME resolves the folder under the expense-reports
+  root. Defaults (no personal paths are baked into this script):
+    expense root   EXPENSE_REPORTS_ROOT in .env,
+                   else ~/Documents/Expense Reports
+    downloads      EXPENSE_DOWNLOADS_DIR in .env, else ~/Downloads
+  --expense-root / --downloads-dir override them per run. Extraction
+  is the only write the script does outside NetSuite, and it happens
+  only when --extract is passed.
+
 TRIP-FOLDER WORKFLOW (the usual way to run it):
   Download the trip's receipts (images/PDFs) and the expense CSV into
   one folder, e.g. OneDrive > Documents > Expense Reports > 2026_10_MSP,
@@ -504,37 +529,134 @@ PHASE_CSV_NAMES = {
 }
 
 
-def resolve_inputs(csv_arg, receipts_dir_arg, phase=None):
+def default_expense_root():
+    """Where trip folders live by default: EXPENSE_REPORTS_ROOT from
+    .env, else ~/Documents/Expense Reports. (Real paths stay in .env,
+    never in this script.)"""
+    return (os.getenv("EXPENSE_REPORTS_ROOT")
+            or os.path.join(os.path.expanduser("~"), "Documents", "Expense Reports"))
+
+
+def default_downloads_dir():
+    """Where submittal zips land: EXPENSE_DOWNLOADS_DIR from .env,
+    else ~/Downloads."""
+    return (os.getenv("EXPENSE_DOWNLOADS_DIR")
+            or os.path.join(os.path.expanduser("~"), "Downloads"))
+
+
+def phase_csv_candidates(folder, phase):
+    """All CSVs in `folder` belonging to `phase`, in submittal order:
+    the unnumbered pre-trip-expenses.csv (submittal 1), then the
+    numbered pre-trip-expenses-2.csv, -3.csv, ... siblings."""
+    from pathlib import Path
+    folder = Path(folder)
+    base = PHASE_CSV_NAMES[phase]
+    stem = base[:-len(".csv")]
+    found = []
+    for f in folder.iterdir():
+        if not (f.is_file() and f.suffix.lower() == ".csv"):
+            continue
+        if f.name == base:
+            found.append((1, f))
+        elif f.name.startswith(stem + "-"):
+            suffix = f.name[len(stem) + 1:-len(".csv")]
+            if suffix.isdigit():
+                found.append((int(suffix), f))
+    return [f for _, f in sorted(found)]
+
+
+def find_submittal_zip(downloads_dir, zip_name=None):
+    """The submittal zip in the downloads folder: the file named by
+    zip_name, or the most recently modified .zip when none is named."""
+    from pathlib import Path
+    d = Path(downloads_dir)
+    if zip_name:
+        candidate = d / zip_name
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Zip not found: {candidate}")
+        return candidate
+    if not d.is_dir():
+        raise FileNotFoundError(f"Downloads folder not found: {d}")
+    zips = [f for f in d.iterdir()
+            if f.is_file() and f.suffix.lower() == ".zip"]
+    if not zips:
+        raise FileNotFoundError(f"No .zip files found in {d}")
+    return max(zips, key=lambda f: f.stat().st_mtime)
+
+
+def extract_submittal(zip_path, dest_folder):
+    """Extract a submittal zip into the trip folder. Entries are
+    written by basename only (the zips are flat: one CSV + its receipt
+    files), so no entry can land outside the folder. Returns the list
+    of file names written."""
+    import zipfile
+    from pathlib import Path
+    dest = Path(dest_folder)
+    written = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            name = Path(info.filename).name
+            if not name or info.is_dir():
+                continue
+            (dest / name).write_bytes(zf.read(info))
+            written.append(name)
+    return written
+
+
+def resolve_inputs(csv_arg, receipts_dir_arg, phase=None, number=None):
     """Resolve (csv_path, receipts_dir) from the command-line arguments.
 
     Ways to run it:
       - a CSV file: receipts default to the CSV's own folder, unless
-        --receipts-dir is given explicitly. --phase, if given, is only
-        a label in this case — the file itself is what gets filled.
+        --receipts-dir is given explicitly. --phase / --number, if
+        given, are only labels in this case — the file itself is what
+        gets filled.
       - a folder: it must contain exactly one .csv file; that CSV is
         used and receipts default to the same folder.
       - a folder + --phase pre-trip / post-trip: the folder's
-        pre-trip-expenses.csv or post-trip-expenses.csv is used. This
-        is the pre-trip / post-trip split: one trip folder holds two
-        reports (pre-trip filed before departure, post-trip after
-        return), so folder mode can no longer mean "the one CSV" —
-        the phase picks which one. Without --phase, a folder with two
-        CSVs is an error that names the phase flag.
+        pre-trip / post-trip CSVs are used. One trip folder holds
+        several reports (pre-trip filed before departure, post-trip
+        after return), and each phase can have several submittals:
+        the unnumbered file plus numbered -2, -3, ... siblings. With
+        exactly one candidate the phase alone picks it; with several,
+        --number N picks one (never guess which report to fill).
+        Without --phase, a folder with two CSVs is an error that
+        names the phase flag.
     """
     from pathlib import Path
     path = Path(csv_arg)
     if path.is_dir():
         if phase:
-            wanted = PHASE_CSV_NAMES[phase]
-            candidate = path / wanted
-            if not candidate.is_file():
+            candidates = phase_csv_candidates(path, phase)
+            if number is not None:
+                wanted = f"{phase}-expenses-{number}.csv"
+                chosen = next((f for f in candidates if f.name == wanted), None)
+                if chosen is None and number == 1:
+                    # The unnumbered file IS submittal 1.
+                    base = path / PHASE_CSV_NAMES[phase]
+                    if base.is_file():
+                        chosen = base
+                if chosen is None:
+                    avail = ", ".join(f.name for f in candidates) or "none"
+                    raise FileNotFoundError(
+                        f"No {wanted} found in folder {csv_arg} "
+                        f"(available for {phase}: {avail}).")
+                csv_path = str(chosen)
+            elif len(candidates) == 1:
+                csv_path = str(candidates[0])
+            elif not candidates:
                 present = ", ".join(sorted(
                     f.name for f in path.iterdir()
                     if f.is_file() and f.suffix.lower() == ".csv"))
                 raise FileNotFoundError(
-                    f"No {wanted} found in folder {csv_arg} "
+                    f"No {PHASE_CSV_NAMES[phase]} found in folder {csv_arg} "
                     f"(found: {present or 'no CSV files'}).")
-            csv_path = str(candidate)
+            else:
+                names = ", ".join(f.name for f in candidates)
+                raise ValueError(
+                    f"Folder {csv_arg} has more than one {phase} CSV "
+                    f"({names}) — pick one with --number N, or pass the "
+                    f"CSV file itself.")
             receipts_dir = receipts_dir_arg or str(path)
             return csv_path, receipts_dir
         csvs = sorted(f for f in path.iterdir()
@@ -561,10 +683,11 @@ def resolve_inputs(csv_arg, receipts_dir_arg, phase=None):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Fill a NetSuite expense report draft from a CSV. Never submits.")
-    parser.add_argument("csv_path",
+    parser.add_argument("csv_path", nargs="?", default=None,
                         help="CSV of expense lines (see sample_expenses.csv), "
                              "OR a folder containing exactly one CSV plus "
-                             "its receipt files (trip-folder workflow)")
+                             "its receipt files (trip-folder workflow). "
+                             "Omit when --trip names the folder.")
     parser.add_argument("--report-name", required=True,
                         help='e.g. "JSmith Week Ending 10/31/26"')
     parser.add_argument("--report-date", default=None,
@@ -576,12 +699,57 @@ def main():
     parser.add_argument("--phase", choices=["pre-trip", "post-trip"],
                         default=None,
                         help="Pre-trip / post-trip split: with a folder, pick "
-                             "pre-trip-expenses.csv or post-trip-expenses.csv "
+                             "the pre-trip-expenses.csv or post-trip-expenses.csv "
                              "from that folder. With a CSV file, ignored.")
+    parser.add_argument("--number", type=int, default=None, metavar="N",
+                        help="With --phase and a folder holding several "
+                             "submittals for that phase (pre-trip-expenses-2.csv, "
+                             "...), fill submittal N. The unnumbered file is 1.")
+    parser.add_argument("--trip", default=None, metavar="NAME",
+                        help="Trip folder name under the expense-reports root "
+                             "(default root: EXPENSE_REPORTS_ROOT in .env, "
+                             "else ~/Documents/Expense Reports). Use instead "
+                             "of passing the folder path.")
+    parser.add_argument("--expense-root", default=None,
+                        help="Folder holding the trip folders "
+                             "(overrides the default expense-reports root).")
+    parser.add_argument("--downloads-dir", default=None,
+                        help="Folder submittal zips are downloaded to "
+                             "(default: EXPENSE_DOWNLOADS_DIR in .env, "
+                             "else ~/Downloads).")
+    parser.add_argument("--extract", nargs="?", const=True, default=None,
+                        metavar="ZIP",
+                        help="Before filling, extract a submittal zip from "
+                             "the downloads folder into the trip folder: the "
+                             "newest .zip, or the ZIP named. This is the "
+                             "only write the script does outside NetSuite.")
     args = parser.parse_args()
+    # Resolve the target: an explicit path wins; --trip names a folder
+    # under the expense-reports root instead.
+    target = args.csv_path
+    if args.trip:
+        root = args.expense_root or default_expense_root()
+        target = os.path.join(root, args.trip)
+    if args.extract is not None:
+        if not target:
+            print("Error: --extract needs a trip folder (a folder path or --trip).")
+            sys.exit(2)
+        dest = target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target))
+        downloads = args.downloads_dir or default_downloads_dir()
+        zip_arg = None if args.extract is True else args.extract
+        try:
+            zip_path = find_submittal_zip(downloads, zip_arg)
+            written = extract_submittal(zip_path, dest)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            sys.exit(2)
+        print(f"Extracted {zip_path.name} into {dest}: {', '.join(written)}")
+    if not target:
+        print("Error: give a CSV file, a trip folder, or --trip NAME.")
+        sys.exit(2)
     try:
         csv_path, receipts_dir = resolve_inputs(
-            args.csv_path, args.receipts_dir, phase=args.phase)
+            target, args.receipts_dir, phase=args.phase, number=args.number)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}")
         sys.exit(2)

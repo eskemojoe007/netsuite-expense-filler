@@ -341,3 +341,132 @@ class TestPhaseMode(unittest.TestCase):
             csv_file = os.path.join(folder, "pre-trip-expenses.csv")
             csv_path, _ = filler.resolve_inputs(csv_file, None, phase="post-trip")
             self.assertEqual(csv_path, csv_file)
+
+
+class TestNumberedPhaseMode(unittest.TestCase):
+    """Numbered submittals: one phase can have several CSVs.
+
+    A trip submitted weekly grows pre-trip-expenses.csv (submittal 1)
+    plus pre-trip-expenses-2.csv, -3.csv, ... — the phase alone picks
+    a file only when there is exactly one candidate; --number N picks
+    among several, and the unnumbered file counts as number 1.
+    """
+
+    def _make_folder(self, tmp, names):
+        folder = os.path.join(tmp, "2026_12_Phx")
+        os.makedirs(folder)
+        for name in names:
+            with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+                f.write("date\n")
+        return folder
+
+    def test_number_picks_the_numbered_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, [
+                "pre-trip-expenses.csv", "pre-trip-expenses-2.csv"])
+            csv_path, _ = filler.resolve_inputs(
+                folder, None, phase="pre-trip", number=2)
+            self.assertEqual(csv_path,
+                             os.path.join(folder, "pre-trip-expenses-2.csv"))
+
+    def test_unnumbered_file_counts_as_number_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, [
+                "pre-trip-expenses.csv", "pre-trip-expenses-2.csv"])
+            csv_path, _ = filler.resolve_inputs(
+                folder, None, phase="pre-trip", number=1)
+            self.assertEqual(csv_path,
+                             os.path.join(folder, "pre-trip-expenses.csv"))
+
+    def test_several_candidates_without_number_fails_naming_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, [
+                "pre-trip-expenses.csv", "pre-trip-expenses-2.csv"])
+            with self.assertRaises(ValueError) as ctx:
+                filler.resolve_inputs(folder, None, phase="pre-trip")
+            self.assertIn("--number", str(ctx.exception))
+
+    def test_single_numbered_candidate_needs_no_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["post-trip-expenses-2.csv"])
+            csv_path, _ = filler.resolve_inputs(folder, None, phase="post-trip")
+            self.assertEqual(csv_path,
+                             os.path.join(folder, "post-trip-expenses-2.csv"))
+
+    def test_missing_number_fails_and_lists_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["pre-trip-expenses.csv"])
+            with self.assertRaises(FileNotFoundError) as ctx:
+                filler.resolve_inputs(folder, None, phase="pre-trip", number=3)
+            self.assertIn("pre-trip-expenses.csv", str(ctx.exception))
+
+    def test_candidates_come_back_in_submittal_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, [
+                "pre-trip-expenses-3.csv", "pre-trip-expenses.csv",
+                "pre-trip-expenses-2.csv", "post-trip-expenses.csv",
+                "notes.csv"])
+            names = [f.name for f in filler.phase_csv_candidates(folder, "pre-trip")]
+            self.assertEqual(names, ["pre-trip-expenses.csv",
+                                     "pre-trip-expenses-2.csv",
+                                     "pre-trip-expenses-3.csv"])
+
+    def test_number_is_ignored_for_a_csv_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = self._make_folder(tmp, ["pre-trip-expenses-2.csv"])
+            csv_file = os.path.join(folder, "pre-trip-expenses-2.csv")
+            csv_path, _ = filler.resolve_inputs(
+                csv_file, None, phase="pre-trip", number=1)
+            self.assertEqual(csv_path, csv_file)
+
+
+class TestSubmittalZip(unittest.TestCase):
+    """--extract helpers: find the zip in Downloads, extract it flat."""
+
+    def _make_zip(self, folder, name, entries, mtime=None):
+        import zipfile
+        path = os.path.join(folder, name)
+        with zipfile.ZipFile(path, "w") as zf:
+            for arcname, text in entries.items():
+                zf.writestr(arcname, text)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_find_zip_picks_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_zip(tmp, "old.zip", {"a.csv": "x"}, mtime=1000)
+            newest = self._make_zip(tmp, "new.zip", {"b.csv": "y"}, mtime=2000)
+            self.assertEqual(str(filler.find_submittal_zip(tmp)), newest)
+
+    def test_find_zip_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wanted = self._make_zip(tmp, "phx.zip", {"a.csv": "x"}, mtime=1000)
+            self._make_zip(tmp, "other.zip", {"b.csv": "y"}, mtime=2000)
+            self.assertEqual(str(filler.find_submittal_zip(tmp, "phx.zip")), wanted)
+
+    def test_find_zip_missing_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                filler.find_submittal_zip(tmp)
+            with self.assertRaises(FileNotFoundError):
+                filler.find_submittal_zip(tmp, "nope.zip")
+
+    def test_extract_writes_files_flat_into_the_trip_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = os.path.join(tmp, "Downloads")
+            trip = os.path.join(tmp, "trip")
+            os.makedirs(downloads)
+            os.makedirs(trip)
+            zip_path = self._make_zip(downloads, "sub.zip", {
+                "pre-trip-expenses.csv": "date,amount\n",
+                "DF_receipt.pdf": "pdf-bytes",
+                "nested/ignored-dir/": "",
+            })
+            written = filler.extract_submittal(zip_path, trip)
+            self.assertEqual(sorted(written),
+                             ["DF_receipt.pdf", "pre-trip-expenses.csv"])
+            with open(os.path.join(trip, "pre-trip-expenses.csv")) as f:
+                self.assertEqual(f.read(), "date,amount\n")
+            # Nothing escaped the trip folder.
+            self.assertFalse(os.path.exists(os.path.join(tmp, "ignored-dir")))
