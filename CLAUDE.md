@@ -49,6 +49,21 @@ python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDri
 - The folder must contain exactly **one** `.csv`. Receipt images/PDFs
   alongside it are ignored by the folder scan. Two CSVs → the script
   stops and names them; pass the CSV file itself in that case.
+- With `--phase pre-trip` / `--phase post-trip`, the folder's CSVs for
+  that phase are the candidates: the unnumbered `pre-trip-expenses.csv`
+  (submittal 1) plus numbered `pre-trip-expenses-2.csv`, `-3`, ...
+  siblings. Exactly one candidate → used as-is; several →
+  `--number N` picks one; the script never guesses which report to
+  fill.
+- `--trip NAME` resolves the folder under the expense-reports root
+  (default: `EXPENSE_REPORTS_ROOT` in `.env`, else
+  `~/Documents/Expense Reports`). `--extract [ZIP]` first extracts a
+  submittal zip from the downloads folder (default:
+  `EXPENSE_DOWNLOADS_DIR` in `.env`, else `~/Downloads`; newest `.zip`
+  or the one named) into the trip folder, entries written flat by
+  basename. It is the script's only write outside NetSuite, and only
+  happens with the flag. Real folder paths live in `.env`, never in
+  the script.
 - Passing a CSV file also works; receipts then default to the CSV's
   own folder. `--receipts-dir` overrides either mode.
 - The CSV is read and checked **before** the browser opens. Missing
@@ -265,3 +280,4 @@ the offline tests passing without selenium installed.
   supplied earlier) is a reusable pattern only — different task, do
   not merge its code in, and its `.env` contents were never seen and
   must never be committed.
+

@@ -92,9 +92,40 @@ python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDri
   --phase pre-trip --report-name "DFolkner Week Ending 12/05/26"
 ```
 
+A trip can need several submittals for the same phase (weekly
+submittals as receipts come in). Numbered siblings are supported:
+`pre-trip-expenses-2.csv`, `pre-trip-expenses-3.csv`, ... — the
+unnumbered file counts as submittal 1. With exactly one candidate,
+`--phase` alone picks it; with several, add `--number N`:
+
+```bash
+python -m pipenv run python netsuite_expense_filler.py "C:\Users\dfolkner\OneDrive - Vertech\Documents\Expense Reports\2026_12_Phx" \
+  --phase pre-trip --number 2 --report-name "DFolkner Week Ending 12/12/26"
+```
+
 A pre-trip run also warns (without blocking) if the report date is on
 or after the first expense date in the CSV. Passing a CSV file directly
 always works, with or without `--phase`.
+
+## Default folders and submittal zips
+
+Prepared submittals arrive as a zip in the Downloads folder. The
+script can extract one into the trip folder first, so a prepared
+submittal is a single command. `--trip NAME` names the trip folder
+under the expense-reports root; `--extract [ZIP]` extracts the newest
+`.zip` in Downloads (or the ZIP named) into it:
+
+```bash
+python -m pipenv run python netsuite_expense_filler.py --trip "2026_12_PHX Christmas" \
+  --extract --phase pre-trip --report-name "DFolkner Week Ending 12/05/26"
+```
+
+Folder defaults come from `.env` (never hard-coded): set
+`EXPENSE_REPORTS_ROOT` and `EXPENSE_DOWNLOADS_DIR` there; without
+them the defaults are `~/Documents/Expense Reports` and `~/Downloads`.
+`--expense-root` / `--downloads-dir` override them per run. Extraction
+is the only write the script does outside NetSuite, and it happens
+only when `--extract` is passed.
 
 Rules and notes:
 - A folder without `--phase` must contain **exactly one** `.csv` file.
